@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Распределение заявок</title>
+    <style>
+      body {
+        font:
+          16px system-ui,
+          sans-serif;
+        max-width: 1050px;
+        margin: 30px auto;
+        padding: 0 18px;
+        color: #202938;
+      }
+      h1 {
+        margin-bottom: 6px;
+      }
+      form,
+      .panel {
+        border: 1px solid #d8dee8;
+        border-radius: 12px;
+        padding: 18px;
+        margin: 18px 0;
+      }
+      label {
+        display: block;
+        margin: 10px 0 5px;
+      }
+      input,
+      textarea,
+      select,
+      button {
+        font: inherit;
+        padding: 9px;
+        border: 1px solid #aeb8c7;
+        border-radius: 7px;
+        box-sizing: border-box;
+        width: 100%;
+      }
+      button {
+        background: #243b64;
+        color: white;
+        cursor: pointer;
+        margin-top: 14px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 9px;
+        border-bottom: 1px solid #e2e7ee;
+        vertical-align: top;
+      }
+      .muted {
+        color: #68758a;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      .msg {
+        margin-top: 12px;
+      }
+      @media (max-width: 700px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        table {
+          display: block;
+          overflow: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Распределение заявок техподдержки</h1>
+    <p class="muted">
+      Учебный сервис: заявка ставится в очередь, фоновый обработчик назначает
+      специалиста с учётом категории и активной нагрузки.
+    </p>
+    <form id="ticket-form">
+      <h2>Создать заявку</h2>
+      <label for="title">Тема</label>
+      <input
+        id="title"
+        required
+        minlength="3"
+        maxlength="200"
+        placeholder="Например, не работает VPN"
+      />
+      <label for="description">Описание</label
+      ><textarea
+        id="description"
+        required
+        minlength="3"
+        rows="3"
+        placeholder="Опишите проблему"
+      ></textarea>
+      <div class="grid">
+        <div>
+          <label for="category">Категория</label
+          ><select id="category">
+            <option value="general">Общая</option>
+            <option value="network">Сеть</option>
+            <option value="hardware">Оборудование</option>
+            <option value="software">Программное обеспечение</option>
+            <option value="access">Доступы</option>
+          </select>
+        </div>
+        <div>
+          <label for="priority">Приоритет (1 — высокий, 5 — низкий)</label
+          ><select id="priority">
+            <option value="1">1 — критический</option>
+            <option value="2">2 — высокий</option>
+            <option value="3" selected>3 — обычный</option>
+            <option value="4">4 — низкий</option>
+            <option value="5">5 — минимальный</option>
+          </select>
+        </div>
+      </div>
+      <button type="submit">Создать и распределить</button>
+      <div id="message" class="msg" role="status"></div>
+    </form>
+    <div class="panel">
+      <h2>Заявки</h2>
+      <button id="refresh">Обновить список</button>
+      <div id="tickets">Загрузка…</div>
+    </div>
+    <div class="panel">
+      <h2>Специалисты</h2>
+      <div id="agents">Загрузка…</div>
+    </div>
+    <p class="muted">API-документация: <a href="/docs">/docs</a></p>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      async function api(path, options = {}) {
+        const r = await fetch(path, {
+          headers: { "Content-Type": "application/json" },
+          ...options,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+        return data;
+      }
+      const statusName = {
+        new: "Новая",
+        queued: "В очереди",
+        unassigned: "Не назначена",
+        assigned: "Назначена",
+        in_progress: "В работе",
+        resolved: "Решена",
+        closed: "Закрыта",
+      };
+      async function refresh() {
+        try {
+          const [ts, as] = await Promise.all([
+            api("/api/tickets"),
+            api("/api/agents"),
+          ]);
+          $("tickets").innerHTML = ts.length
+            ? `<table><thead><tr><th>ID</th><th>Тема</th><th>Категория</th><th>Приоритет</th><th>Статус</th><th>Исполнитель</th><th>Действие</th></tr></thead><tbody>${ts.map((t) => `<tr><td>${t.id}</td><td>${esc(t.title)}<br><span class="muted">${esc(t.description)}</span></td><td>${esc(t.category)}</td><td>${t.priority}</td><td>${statusName[t.status] || t.status}</td><td>${esc(t.agent_name || "—")}</td><td>${t.agent_id && ["assigned", "in_progress"].includes(t.status) ? `<button onclick="setStatus(${t.id},'in_progress')">В работу</button><button onclick="setStatus(${t.id},'resolved')">Решена</button>` : "—"}</td></tr>`).join("")}</tbody></table>`
+            : "Заявок пока нет";
+          $("agents").innerHTML = as
+            .map(
+              (a) =>
+                `<p><b>${esc(a.name)}</b> — навыки: ${esc(a.skills)}; ${a.is_active ? "активен" : "неактивен"}</p>`,
+            )
+            .join("");
+        } catch (e) {
+          $("tickets").textContent = "Ошибка загрузки: " + e.message;
+        }
+      }
+      function esc(s) {
+        return String(s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      }
+      async function setStatus(id, status) {
+        try {
+          await api(`/api/tickets/${id}/status?status=${status}`, {
+            method: "PATCH",
+          });
+          await refresh();
+        } catch (e) {
+          alert(e.message);
+        }
+      }
+      $("ticket-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        $("message").textContent = "Отправка…";
+        try {
+          const t = await api("/api/tickets", {
+            method: "POST",
+            body: JSON.stringify({
+              title: $("title").value,
+              description: $("description").value,
+              category: $("category").value,
+              priority: Number($("priority").value),
+            }),
+          });
+          $("message").textContent =
+            `Заявка №${t.id} добавлена в очередь. Назначение выполняется в фоне.`;
+          e.target.reset();
+          setTimeout(refresh, 1000);
+          setTimeout(refresh, 2500);
+        } catch (err) {
+          $("message").textContent = "Ошибка: " + err.message;
+        }
+      });
+      $("refresh").addEventListener("click", refresh);
+      refresh();
+      setInterval(refresh, 7000);
+    </script>
+  </body>
+</html>

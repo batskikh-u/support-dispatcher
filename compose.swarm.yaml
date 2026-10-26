@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: supportdb
+      POSTGRES_USER: support
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U support -d supportdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy: {condition: on-failure}
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    networks: [backend]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy: {condition: on-failure}
+  api:
+    image: ${REGISTRY_IMAGE:?Set REGISTRY_IMAGE}/api:${IMAGE_TAG:-latest}
+    environment:
+      DATABASE_URL: postgresql+psycopg://support:${POSTGRES_PASSWORD}@db:5432/supportdb
+      REDIS_URL: redis://redis:6379/0
+    networks: [backend]
+    deploy:
+      replicas: 2
+      restart_policy: {condition: on-failure}
+      update_config: {parallelism: 1, delay: 10s, order: start-first}
+  worker:
+    image: ${REGISTRY_IMAGE:?Set REGISTRY_IMAGE}/api:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://support:${POSTGRES_PASSWORD}@db:5432/supportdb
+      REDIS_URL: redis://redis:6379/0
+    networks: [backend]
+    deploy:
+      replicas: 1
+      restart_policy: {condition: on-failure}
+  web:
+    image: ${REGISTRY_IMAGE:?Set REGISTRY_IMAGE}/web:${IMAGE_TAG:-latest}
+    ports: ["8080:80"]
+    networks: [backend]
+    deploy:
+      replicas: 2
+      restart_policy: {condition: on-failure}
+      update_config: {parallelism: 1, delay: 5s, order: start-first}
+networks:
+  backend:
+    driver: overlay
+    attachable: true
+volumes:
+  postgres_data:
+  redis_data:
