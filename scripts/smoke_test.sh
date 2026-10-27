@@ -7,15 +7,17 @@ set -euo pipefail
 BASE_URL="${1:-http://localhost:8080}"
 
 echo "[1/3] Проверка ${BASE_URL}/health"
-for attempt in $(seq 1 30); do
-  if curl -fsS --max-time 3 "${BASE_URL}/health" > /dev/null; then
+for attempt in $(seq 1 40); do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "${BASE_URL}/health" || true)
+  echo "  попытка ${attempt}: HTTP ${CODE}"
+  if [ "${CODE}" = "200" ]; then
     break
   fi
-  if [ "${attempt}" -eq 30 ]; then
-    echo "Сервис не ответил на /health за 30 попыток" >&2
+  if [ "${attempt}" -eq 40 ]; then
+    echo "Сервис не ответил на /health за 40 попыток" >&2
     exit 1
   fi
-  sleep 2
+  sleep 3
 done
 curl -fsS "${BASE_URL}/health"; echo
 
