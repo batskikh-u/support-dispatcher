@@ -79,10 +79,64 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
-  deploy:
-    name: Развёртывание в Docker Swarm
+  deploy-ci:
+    name: Развёртывание стека в Docker Swarm на раннере GitHub
     needs: build-and-push
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Имя образа в нижнем регистре
+        run: echo "REGISTRY_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Создание кластера Swarm (один узел)
+        run: docker swarm init --advertise-addr "$(hostname -I | awk '{print $1}')"
+
+      - name: Развёртывание стека из опубликованных образов
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          POSTGRES_PASSWORD: ci_${{ github.run_id }}_pass
+        run: docker stack deploy --with-registry-auth -c compose.swarm.yaml support
+
+      - name: Ожидание запуска всех сервисов
+        run: |
+          for i in $(seq 1 60); do
+            not_ready=$(docker stack services support --format '{{.Replicas}}' | awk -F/ '$1!=$2' | wc -l)
+            if [ "$not_ready" -eq 0 ]; then docker stack services support; exit 0; fi
+            sleep 5
+          done
+          docker stack ps support --no-trunc
+          exit 1
+
+      - name: Проверка работоспособности (smoke-тест)
+        run: bash scripts/smoke_test.sh http://localhost:8080
+
+      - name: Диагностика при сбое
+        if: failure()
+        run: |
+          docker stack ps support --no-trunc || true
+          for s in api worker web db redis; do docker service logs --tail 30 "support_$s" || true; done
+
+      - name: Удаление стека
+        if: always()
+        run: |
+          docker stack rm support || true
+          docker swarm leave --force || true
+
+  deploy-server:
+    name: Развёртывание на внешнем сервере (включается переменной DEPLOY_ENABLED=true)
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: production
     concurrency:
