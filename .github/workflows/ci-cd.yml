@@ -1,74 +1,137 @@
-name: CI-CD
+name: CI/CD
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
 permissions:
   contents: read
-  packages: write
+
 jobs:
   test:
+    name: Тесты и проверка конфигурации
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
-      - run: pip install -r requirements.txt
-      - run: pytest -q
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      - name: Модульные тесты и тесты API
+        run: pytest -q
+
+      - name: Проверка синтаксиса compose-файлов
+        run: |
+          docker compose -f compose.yaml config -q
+          POSTGRES_PASSWORD=ci REGISTRY_IMAGE=ghcr.io/example/app \
+            docker compose -f compose.swarm.yaml config -q
+
   build-and-push:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Сборка и публикация образов
     needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Имя образа в нижнем регистре (требование GHCR)
+        run: echo "REGISTRY_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+
+      - name: Сборка и публикация образа api (используется и worker)
+        uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository }}/api:${{ github.sha }}
-      - uses: docker/build-push-action@v6
+          tags: |
+            ${{ env.REGISTRY_IMAGE }}/api:${{ github.sha }}
+            ${{ env.REGISTRY_IMAGE }}/api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Сборка и публикация образа web
+        uses: docker/build-push-action@v6
         with:
           context: ./frontend
+          file: ./frontend/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository }}/web:${{ github.sha }}
+          tags: |
+            ${{ env.REGISTRY_IMAGE }}/web:${{ github.sha }}
+            ${{ env.REGISTRY_IMAGE }}/web:latest
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Развёртывание в Docker Swarm
     needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      IMAGE_TAG: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-      - name: Copy Swarm stack file
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "compose.swarm.yaml"
-          target: "/opt/support-dispatcher"
-      - name: Deploy stack on Swarm manager
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-          REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: IMAGE_TAG,REGISTRY_IMAGE,POSTGRES_PASSWORD,GHCR_USER,GHCR_TOKEN
-          script: |
-            set -eu
-            cd /opt/support-dispatcher
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            export IMAGE_TAG REGISTRY_IMAGE POSTGRES_PASSWORD
-            docker stack deploy --with-registry-auth -c compose.swarm.yaml support-dispatcher
-            docker stack services support-dispatcher
+
+      - name: Имя образа в нижнем регистре
+        run: echo "REGISTRY_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Подготовка SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Передача stack-файла и скрипта проверки
+        run: |
+          scp compose.swarm.yaml scripts/smoke_test.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:/opt/support/"
+
+      - name: Развёртывание стека
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REGISTRY_IMAGE='$REGISTRY_IMAGE' IMAGE_TAG='$IMAGE_TAG' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/support
+          set -a; . ./.env; set +a
+          docker stack deploy --with-registry-auth --prune -c compose.swarm.yaml support
+          docker stack services support
+          REMOTE
+
+      - name: Проверка после развёртывания и автоматический откат
+        run: |
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<'REMOTE'
+          set -uo pipefail
+          cd /opt/support
+          sleep 20
+          if ! bash ./smoke_test.sh http://localhost:8080; then
+            echo "Smoke-тест не пройден, выполняется откат" >&2
+            for service in api web worker; do
+              docker service rollback "support_${service}" || true
+            done
+            exit 1
+          fi
+          REMOTE
