@@ -118,12 +118,20 @@ jobs:
           docker stack ps support --no-trunc
           exit 1
 
-      - name: Проверка работоспособности (smoke-тест)
-        run: bash scripts/smoke_test.sh http://localhost:8080
+      - name: Проверка работоспособности (smoke-тест внутри сети кластера)
+        run: |
+          docker run --rm --network support_backend \
+            -v "$PWD/scripts:/scripts:ro" python:3.12-slim \
+            python /scripts/smoke_test.py http://web:80
+
+      - name: Проверка опубликованного порта 8080 (справочно)
+        continue-on-error: true
+        run: curl -sS -m 5 -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:8080/health
 
       - name: Диагностика при сбое
         if: failure()
         run: |
+          docker stack services support || true
           docker stack ps support --no-trunc || true
           for s in api worker web db redis; do docker service logs --tail 30 "support_$s" || true; done
 

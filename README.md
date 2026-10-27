@@ -9,7 +9,7 @@
 app/                  # backend: API и фоновый обработчик (Python-пакет)
 frontend/             # веб-интерфейс, nginx.conf и Dockerfile контейнера web
 tests/                # автоматические тесты (pytest)
-scripts/smoke_test.sh # проверка системы после развёртывания
+scripts/smoke_test.py # проверка после развёртывания (smoke_test.sh — вариант для сервера)
 .github/workflows/    # конвейер CI/CD (GitHub Actions)
 Dockerfile            # образ api и worker
 compose.yaml          # запуск на одном узле (Docker Compose)
@@ -72,7 +72,7 @@ docker stack services support
 ## CI/CD
 
 Конвейер `.github/workflows/ci-cd.yml`: тесты → сборка и публикация образов в GHCR → деплой в Swarm по SSH →
-проверка `scripts/smoke_test.sh` с автоматическим откатом. Секреты репозитория: `DEPLOY_HOST`, `DEPLOY_USER`,
+проверка (`scripts/smoke_test.py` внутри сети кластера, на внешнем сервере — `smoke_test.sh`) с автоматическим откатом. Секреты репозитория: `DEPLOY_HOST`, `DEPLOY_USER`,
 `SSH_PRIVATE_KEY`. Пароль БД хранится на сервере в `/opt/support/.env`.
 
 ## API
